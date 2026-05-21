@@ -790,8 +790,7 @@ func (h *handler) addHandlerContext(messages ...*Message) {
 }
 
 func (h *handler) handleClose(ctx context.Context) {
-	select {
-	case <-h.routersCloseCh:
+	closeSubscriber := func() {
 		if stoppable, ok := h.originalSubscriber.(Stoppable); ok {
 			h.logger.Debug("Stopping subscriber", nil)
 			if err := stoppable.Stop(); err != nil {
@@ -806,7 +805,22 @@ func (h *handler) handleClose(ctx context.Context) {
 			h.logger.Error("Failed to close subscriber", err, nil)
 		}
 		h.logger.Debug("Subscriber closed", nil)
+	}
+
+	select {
+	case <-h.routersCloseCh:
+		closeSubscriber()
 	case <-ctx.Done():
+		// ctx.Done can race with routersCloseCh during a router-wide close:
+		// Router.Close closes routersCloseCh, then Router.Run cancels the parent ctx,
+		// and the select picks whichever fires first. If routersCloseCh is also closed
+		// here, this is a router-wide close and the subscriber must be closed —
+		// otherwise it's Handler.Stop() and the subscriber may be shared.
+		select {
+		case <-h.routersCloseCh:
+			closeSubscriber()
+		default:
+		}
 	}
 	h.stopFn()
 }
